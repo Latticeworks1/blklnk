@@ -38,15 +38,21 @@ class DatabaseExporter:
                 host_data = dict(row)
                 
                 # Parse JSON fields
-                if host_data['models_json']:
-                    host_data['models'] = json.loads(host_data['models_json'])
-                else:
-                    host_data['models'] = []
+                try:
+                    if host_data['models_json']:
+                        host_data['models'] = json.loads(host_data['models_json'])
+                    else:
+                        host_data['models'] = []
+                except json.JSONDecodeError:
+                    host_data['models'] = [] # Default to empty list on error
                 
-                if host_data['shodan_data_json']:
-                    host_data['shodan_data'] = json.loads(host_data['shodan_data_json'])
-                else:
-                    host_data['shodan_data'] = {}
+                try:
+                    if host_data['shodan_data_json']:
+                        host_data['shodan_data'] = json.loads(host_data['shodan_data_json'])
+                    else:
+                        host_data['shodan_data'] = {}
+                except json.JSONDecodeError:
+                    host_data['shodan_data'] = {} # Default to empty dict on error
                 
                 # Remove JSON fields (we have parsed versions)
                 del host_data['models_json']
@@ -211,6 +217,10 @@ class DatabaseExporter:
                    batch_size: int = 100):
         """Push data to API endpoint"""
         print(f"🚀 Pushing data to API: {api_url}")
+
+        if batch_size <= 0:
+            print("❌ Batch size must be a positive integer.")
+            return False
         
         hosts = self.get_active_hosts(hours)
         
