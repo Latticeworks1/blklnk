@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Colab-Ready Ollama Health Monitor
+Ollama Monitor
 =================================
 
 Production health monitoring for 900 Ollama endpoints.
