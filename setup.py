@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
 Setup script for Shodan Ollama Scanner
@@ -14,7 +15,8 @@ REQUIREMENTS = [
     "shodan>=1.28.0",
     "aiohttp>=3.8.0",
     "asyncio",
-    "sqlite3"  # Built-in with Python
+    "sqlite3",  # Built-in with Python
+    "pyarrow"
 ]
 
 OPTIONAL_REQUIREMENTS = [
@@ -24,7 +26,7 @@ OPTIONAL_REQUIREMENTS = [
 
 def install_requirements():
     """Install required packages"""
-    print("📦 Installing requirements...")
+    print("Installing requirements...")
     
     for req in REQUIREMENTS:
         if req == "sqlite3":  # Skip built-in modules
@@ -33,18 +35,18 @@ def install_requirements():
         try:
             print(f"Installing {req}...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", req])
-            print(f"✅ {req} installed")
+            print(f"{req} installed")
         except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to install {req}: {e}")
+            print(f"Failed to install {req}: {e}")
             return False
     
     # Try optional packages
     for req in OPTIONAL_REQUIREMENTS:
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", req])
-            print(f"✅ {req} (optional) installed")
+            print(f"{req} (optional) installed")
         except:
-            print(f"⚠️ {req} (optional) failed - continuing without it")
+            print(f"{req} (optional) failed - continuing without it")
     
     return True
 
@@ -82,12 +84,46 @@ LOG_FILE = "ollama_scanner.log"
     with open(config_file, 'w') as f:
         f.write(config_content)
     
-    print(f"✅ Configuration template created: {config_file}")
-    print("💡 Copy config_template.py to config.py and add your Shodan API key")
+    print(f"Configuration template created: {config_file}")
+    print("Copy config_template.py to config.py and add your Shodan API key")
+
+def main_setup():
+    """Run the complete setup process"""
+    print("Shodan Ollama Scanner Setup")
+    print("=" * 40)
+    
+    # Check Python version
+    if sys.version_info < (3, 8):
+        print("Python 3.8+ required")
+        return False
+    
+    print(f"Python {sys.version_info.major}.{sys.version_info.minor} detected")
+    
+    # Install requirements
+    if not install_requirements():
+        print("Failed to install requirements")
+        return False
+    
+    # Create configuration files
+    create_config_file()
+    create_launcher_scripts() # This will be called recursively, it's fine.
+    create_readme()
+    
+    print("\n" + "=" * 60)
+    print("SETUP COMPLETE!")
+    print("=" * 60)
+    print("Next steps:")
+    print("1. Get a Shodan API key from https://shodan.io")
+    print("2. Copy config_template.py to config.py")
+    print("3. Edit config.py and add your API key")
+    print("4. Run: python quick_scan.py")
+    print("\nCheck README.md for detailed usage instructions")
+    
+    return True
 
 def create_launcher_scripts():
     """Create convenient launcher scripts"""
-    
+
     # Quick scan script
     quick_scan = '''#!/usr/bin/env python3
 """Quick scan launcher"""
@@ -100,49 +136,16 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from config import SHODAN_API_KEY, DEFAULT_LIMIT_PER_QUERY, DEFAULT_CONCURRENT_VALIDATIONS
 except ImportError:
-    print("❌ Please create config.py with your Shodan API key")
-    print("💡 Copy config_template.py to config.py and edit it")
+    print("Please create config.py with your Shodan API key")
+    print("Copy config_template.py to config.py and edit it")
     sys.exit(1)
 
 import subprocess
 
-def main():
-    """Run the complete setup process"""
-    print("🚀 Shodan Ollama Scanner Setup")
-    print("=" * 40)
-    
-    # Check Python version
-    if sys.version_info < (3, 8):
-        print("❌ Python 3.8+ required")
-        return False
-    
-    print(f"✅ Python {sys.version_info.major}.{sys.version_info.minor} detected")
-    
-    # Install requirements
-    if not install_requirements():
-        print("❌ Failed to install requirements")
-        return False
-    
-    # Create configuration files
-    create_config_file()
-    create_launcher_scripts()
-    create_readme()
-    
-    print("\n" + "=" * 60)
-    print("🎉 SETUP COMPLETE!")
-    print("=" * 60)
-    print("📋 Next steps:")
-    print("1. Get a Shodan API key from https://shodan.io")
-    print("2. Copy config_template.py to config.py")
-    print("3. Edit config.py and add your API key")
-    print("4. Run: python quick_scan.py")
-    print("\n💡 Check README.md for detailed usage instructions")
-    
-    return True
+# Note: The main_setup() function for the setup.py script is now defined globally.
+# The quick_scan.py script will have its own main() function.
 
-if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+def main(): # This is the main for quick_scan.py
     cmd = [
         sys.executable, "shodan_scanner.py",
         "--api-key", SHODAN_API_KEY,
@@ -151,13 +154,32 @@ if __name__ == "__main__":
         "--concurrent", str(DEFAULT_CONCURRENT_VALIDATIONS)
     ]
     
-    print("🚀 Starting quick Ollama scan...")
+    print("Starting quick Ollama scan...")
     subprocess.run(cmd)
 
 if __name__ == "__main__":
     main()
 '''
     
+    # Continuous scan script
+
+# The following is part of the quick_scan.py script content
+# It should not be part of the setup.py execution flow directly
+
+#    cmd = [
+#        sys.executable, "shodan_scanner.py",
+#        "--api-key", SHODAN_API_KEY,
+#        "--scan",
+#        "--limit", str(DEFAULT_LIMIT_PER_QUERY),
+#        "--concurrent", str(DEFAULT_CONCURRENT_VALIDATIONS)
+#    ]
+#
+#    print("🚀 Starting quick Ollama scan...")
+#    subprocess.run(cmd)
+
+#if __name__ == "__main__":
+#    main() # Corrected to call quick_scan.py's main
+
     # Continuous scan script
     continuous_scan = '''#!/usr/bin/env python3
 """Continuous scan launcher"""
@@ -170,8 +192,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from config import SHODAN_API_KEY, DEFAULT_LIMIT_PER_QUERY, DEFAULT_CONCURRENT_VALIDATIONS
 except ImportError:
-    print("❌ Please create config.py with your Shodan API key")
-    print("💡 Copy config_template.py to config.py and edit it")
+    print("Please create config.py with your Shodan API key")
+    print("Copy config_template.py to config.py and edit it")
     sys.exit(1)
 
 import subprocess
@@ -185,8 +207,8 @@ def main():
         "--concurrent", str(DEFAULT_CONCURRENT_VALIDATIONS)
     ]
     
-    print("🔄 Starting continuous Ollama scanning...")
-    print("⚠️  This will run forever. Press Ctrl+C to stop.")
+    print("Starting continuous Ollama scanning...")
+    print("This will run forever. Press Ctrl+C to stop.")
     subprocess.run(cmd)
 
 if __name__ == "__main__":
@@ -205,8 +227,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from config import SHODAN_API_KEY
 except ImportError:
-    print("❌ Please create config.py with your Shodan API key")
-    print("💡 Copy config_template.py to config.py and edit it")
+    print("Please create config.py with your Shodan API key")
+    print("Copy config_template.py to config.py and edit it")
     sys.exit(1)
 
 import subprocess
@@ -239,11 +261,14 @@ if __name__ == "__main__":
         if os.name != 'nt':
             os.chmod(filename, 0o755)
         
-        print(f"✅ Created {filename}")
+        print(f"Created {filename}")
 
 def create_readme():
     """Create README with usage instructions"""
     readme_content = '''# Shodan Ollama Scanner
+
+# Note: The main_setup() function is now defined globally above create_launcher_scripts()
+# and is called by the if __name__ == "__main__": block at the end of this file.
 
 Automatically discovers Ollama instances using Shodan API, validates them, and stores results in a SQLite database.
 
@@ -313,13 +338,13 @@ The scanner uses multiple targeted queries to find Ollama instances:
 
 ## Features
 
-- 🔍 **Shodan Integration**: Automatically discovers Ollama instances
-- ✅ **Validation**: Tests each host to confirm it's running Ollama
-- 💾 **Database Storage**: Persistent SQLite database with full metadata
-- 🚀 **Concurrent Processing**: Fast validation with configurable concurrency
-- 📊 **Statistics**: Detailed scan metrics and host statistics
-- 🔄 **Continuous Mode**: Run periodic scans automatically
-- 🛡️ **Error Handling**: Robust error handling and retry logic
+- **Shodan Integration**: Automatically discovers Ollama instances
+- **Validation**: Tests each host to confirm it's running Ollama
+- **Database Storage**: Persistent SQLite database with full metadata
+- **Concurrent Processing**: Fast validation with configurable concurrency
+- **Statistics**: Detailed scan metrics and host statistics
+- **Continuous Mode**: Run periodic scans automatically
+- **Error Handling**: Robust error handling and retry logic
 
 ## Database Integration
 
@@ -364,6 +389,9 @@ The scanner respects Shodan's rate limits:
     with open("README.md", 'w') as f:
         f.write(readme_content)
     
-    print("✅ Created README.md")
+    print("Created README.md")
 
-def main():
+# This is the correct place to call main_setup for the setup.py script itself
+if __name__ == "__main__":
+    success = main_setup()
+    sys.exit(0 if success else 1)
