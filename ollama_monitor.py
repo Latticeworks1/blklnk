@@ -162,6 +162,27 @@ def create_monitor():
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_last_check ON endpoints(last_check)
                 """)
+
+                # Add new columns if they don't exist
+                columns_to_add = [
+                    ("shodan_country", "TEXT"),
+                    ("shodan_org", "TEXT"),
+                    ("shodan_isp", "TEXT"),
+                    ("ollama_version_reported_by_shodan_scan", "TEXT"),
+                    ("discovered_by_shodan_at", "TIMESTAMP"),
+                    ("last_seen_by_shodan_at", "TIMESTAMP")
+                ]
+
+                for column_name, column_type in columns_to_add:
+                    try:
+                        conn.execute(f"ALTER TABLE endpoints ADD COLUMN {column_name} {column_type};")
+                        logger.info(f"Added column '{column_name}' to 'endpoints' table.")
+                    except sqlite3.OperationalError as e:
+                        if "duplicate column name" in str(e).lower():
+                            logger.info(f"Column '{column_name}' already exists in 'endpoints' table.")
+                        else:
+                            logger.error(f"Failed to add column '{column_name}': {e}")
+                            raise # Re-raise other operational errors
         
         def save(self, endpoint: Endpoint):
             with sqlite3.connect(self.path) as conn:

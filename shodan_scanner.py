@@ -24,7 +24,8 @@ from typing import Dict, Any, List, Optional
 # Default configuration values
 DEFAULT_CONFIG = {
     'SHODAN_API_KEY': None,  # Required, must be in config.py or via --api-key
-    'DATABASE_PATH': 'ollama_hosts.db',
+    'DATABASE_PATH': 'ollama_hosts.db', # For shodan_scanner's own findings
+    'HEALTH_DB_PATH': 'health.db',      # For ollama_monitor's main health tracking
     'DEFAULT_CONCURRENT_VALIDATIONS': 10,
     'DEFAULT_LIMIT_PER_QUERY': 100,
     'CUSTOM_QUERIES': ['product:"Ollama"'],
@@ -439,6 +440,72 @@ def add_scan_history(
         f"New={new_host_count}, Duration={scan_duration_seconds:.2f}s"
     )
 
+# --- health.db Interaction Functions ---
+
+def get_health_db_host(health_db_cursor: sqlite3.Cursor, host_id: str) -> Optional[sqlite3.Row]:
+    """Fetches a host by host_id from the health.db endpoints table."""
+    health_db_cursor.execute("SELECT * FROM endpoints WHERE id = ?", (host_id,))
+    return health_db_cursor.fetchone()
+
+def insert_health_db_host(health_db_cursor: sqlite3.Cursor, validated_host_data: Dict[str, Any], shodan_match_data: Dict[str, Any]):
+    """Inserts a new host into health.db's endpoints table."""
+    now_iso = datetime.now().isoformat()
+    host_id = f"{validated_host_data['ip']}:{validated_host_data['port']}"
+    location = shodan_match_data.get('location', {})
+
+    health_db_cursor.execute("""
+        INSERT INTO endpoints (
+            id, ip, port, status, response_ms, model_count, models, last_check, consecutive_failures,
+            shodan_country, shodan_org, shodan_isp, ollama_version_reported_by_shodan_scan,
+            discovered_by_shodan_at, last_seen_by_shodan_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        host_id, validated_host_data['ip'], validated_host_data['port'],
+        'unknown', # Initial status for ollama_monitor to verify
+        validated_host_data.get('response_time_ms'),
+        validated_host_data.get('model_count', 0),
+        json.dumps(validated_host_data.get('models', [])),
+        now_iso, # last_check (by shodan_scanner, effectively)
+        0, # consecutive_failures
+        location.get('country_name'),
+        shodan_match_data.get('org'),
+        shodan_match_data.get('isp'),
+        validated_host_data.get('ollama_version'), # From shodan_scanner's validation
+        now_iso, # discovered_by_shodan_at
+        now_iso  # last_seen_by_shodan_at
+    ))
+    logging.info(f"Inserted new host {host_id} into health.db.")
+
+def update_health_db_host(health_db_cursor: sqlite3.Cursor, host_id: str, validated_host_data: Dict[str, Any], shodan_match_data: Dict[str, Any]):
+    """Updates an existing host in health.db's endpoints table."""
+    now_iso = datetime.now().isoformat()
+    location = shodan_match_data.get('location', {})
+
+    update_fields = {
+        'last_seen_by_shodan_at': now_iso,
+        'shodan_country': location.get('country_name'),
+        'shodan_org': shodan_match_data.get('org'),
+        'shodan_isp': shodan_match_data.get('isp'),
+        'ollama_version_reported_by_shodan_scan': validated_host_data.get('ollama_version')
+    }
+
+    # If shodan_scanner found it online, update these fields as potentially fresher
+    if validated_host_data.get('status') == 'online':
+        update_fields['response_ms'] = validated_host_data.get('response_time_ms')
+        update_fields['model_count'] = validated_host_data.get('model_count', 0)
+        update_fields['models'] = json.dumps(validated_host_data.get('models', []))
+        # Note: We do NOT update 'status', 'last_check', 'consecutive_failures' here.
+        # 'last_check' could be updated by shodan_scanner if we decide its validation is a type of "check",
+        # but ollama_monitor.py is the primary manager of that field. Setting last_seen_by_shodan_at is safer.
+
+    set_clause = ", ".join([f"{key} = ?" for key in update_fields.keys()])
+    params = list(update_fields.values())
+    params.append(host_id)
+
+    health_db_cursor.execute(f"UPDATE endpoints SET {set_clause} WHERE id = ?", tuple(params))
+    logging.info(f"Updated host {host_id} in health.db with Shodan data.")
+
+
 def display_statistics(db_path: str):
     """
     Connects to the database and displays various statistics.
@@ -568,20 +635,20 @@ def perform_scan_cycle(
     if shodan_results:
         logging.info(f"Received {len(shodan_results)} results from Shodan query_shodan function.")
 
-        scan_start_time = time.time() # Start timing before validation
+        scan_start_time_shodan_db = time.time() # Timing for shodan_scanner's own DB operations
 
         validation_timeout_seconds = 10 # Hardcoded for now
 
         logging.info(f"Starting concurrent validation of {len(shodan_results)} hosts (Concurrency: {current_concurrent})...")
 
-        # --- Database Connection ---
-        conn = None
+        # --- ollama_hosts.db (shodan_scanner's own DB) Operations ---
+        shodan_db_conn = None
         try:
-            conn = sqlite3.connect(config['DATABASE_PATH'])
-            cursor = conn.cursor()
+            shodan_db_conn = sqlite3.connect(config['DATABASE_PATH'])
+            shodan_db_cursor = shodan_db_conn.cursor()
 
-            new_host_count = 0
-            valid_online_count = 0
+            new_host_count_shodan_db = 0
+            valid_online_count_shodan_db = 0 # shodan_scanner's view of online
 
             validated_hosts_results = asyncio.run(run_validation_logic_async(
                 shodan_results,
@@ -589,80 +656,85 @@ def perform_scan_cycle(
                 validation_timeout_seconds
             ))
 
-            logging.info(f"Validation complete. Processed {len(validated_hosts_results)} hosts for DB operations.")
-            # This print might be too verbose for continuous mode, consider removing or reducing
-            # print("\n--- Host Validation & DB Results (Cycle) ---")
+            logging.info(f"Validation complete. Processed {len(validated_hosts_results)} hosts for shodan_scanner.db operations.")
 
             for i, validation_result in enumerate(validated_hosts_results):
                 host_ip = validation_result.get('ip')
                 host_port = validation_result.get('port')
-
-                if not host_ip or host_port is None:
-                    logging.warning(f"Skipping DB operation for invalid validation result: {validation_result}")
-                    continue
-
+                if not host_ip or host_port is None: continue
                 host_id = f"{host_ip}:{host_port}"
-                current_shodan_info = {}
-                if i < len(shodan_results):
-                    if shodan_results[i].get('ip_str') == host_ip and shodan_results[i].get('port') == host_port:
-                        current_shodan_info = shodan_results[i]
-                    else:
-                        for sr in shodan_results: # Fallback search
-                            if sr.get('ip_str') == host_ip and sr.get('port') == host_port:
-                                current_shodan_info = sr
-                                break
+                current_shodan_info = next((sr for sr in shodan_results if sr.get('ip_str') == host_ip and sr.get('port') == host_port), {})
 
-                db_host = get_host(cursor, host_id)
-
+                db_host = get_host(shodan_db_cursor, host_id)
                 if validation_result.get('status') == 'online':
-                    valid_online_count += 1
+                    valid_online_count_shodan_db += 1
                     if not db_host:
-                        insert_host(cursor, validation_result, current_shodan_info)
-                        new_host_count += 1
-                        # logging.debug(f"Host {host_id}: ONLINE (New) - Added to DB. Models: {validation_result.get('models')}")
+                        insert_host(shodan_db_cursor, validation_result, current_shodan_info)
+                        new_host_count_shodan_db += 1
                     else:
-                        update_host(cursor, host_id, validation_result, current_shodan_info)
-                        # logging.debug(f"Host {host_id}: ONLINE (Existing) - Updated in DB. Models: {validation_result.get('models')}")
+                        update_host(shodan_db_cursor, host_id, validation_result, current_shodan_info)
                 elif validation_result.get('status') not in ['error_during_validation']:
                     if db_host:
-                        update_host(cursor, host_id, validation_result, current_shodan_info)
-                        # logging.debug(f"Host {host_id}: {validation_result.get('status')} (Existing) - Updated status. Reason: {validation_result.get('reason')}")
-                # else: error_during_validation - already logged by validate_hosts_concurrently
+                        update_host(shodan_db_cursor, host_id, validation_result, current_shodan_info)
 
-            scan_duration_seconds = time.time() - scan_start_time
-            add_scan_history(cursor, len(shodan_results), valid_online_count, new_host_count, scan_duration_seconds)
+            scan_duration_shodan_db_seconds = time.time() - scan_start_time_shodan_db
+            add_scan_history(shodan_db_cursor, len(shodan_results), valid_online_count_shodan_db, new_host_count_shodan_db, scan_duration_shodan_db_seconds)
+            shodan_db_conn.commit()
+            logging.info("shodan_scanner.db operations complete. Transaction committed.")
 
-            conn.commit()
-            logging.info("Database operations complete for cycle. Transaction committed.")
-            # print("----------------------------------\n")
+            # --- health.db Operations ---
+            health_db_conn = None
+            try:
+                health_db_conn = sqlite3.connect(config['HEALTH_DB_PATH'])
+                health_db_cursor = health_db_conn.cursor()
+                logging.info(f"Connected to health.db at {config['HEALTH_DB_PATH']} for updates.")
 
-        except sqlite3.Error as e:
-            logging.error(f"SQLite error during scan cycle processing: {e}")
-            if conn:
-                conn.rollback()
-        except Exception as e:
-            logging.error(f"Unexpected error during scan cycle processing: {e}")
-            if conn:
-                conn.rollback()
+                for i, validation_result in enumerate(validated_hosts_results):
+                    if validation_result.get('status') == 'online': # Only process 'online' hosts for health.db
+                        host_ip = validation_result.get('ip')
+                        host_port = validation_result.get('port')
+                        if not host_ip or host_port is None: continue
+                        host_id = f"{host_ip}:{host_port}"
+                        current_shodan_info = next((sr for sr in shodan_results if sr.get('ip_str') == host_ip and sr.get('port') == host_port), {})
+
+                        health_db_host = get_health_db_host(health_db_cursor, host_id)
+                        if not health_db_host:
+                            insert_health_db_host(health_db_cursor, validation_result, current_shodan_info)
+                        else:
+                            update_health_db_host(health_db_cursor, host_id, validation_result, current_shodan_info)
+                health_db_conn.commit()
+                logging.info("health.db operations complete. Transaction committed.")
+            except sqlite3.Error as e:
+                logging.error(f"SQLite error during health.db processing: {e}")
+                if health_db_conn: health_db_conn.rollback()
+            except Exception as e:
+                logging.error(f"Unexpected error during health.db processing: {e}")
+                if health_db_conn: health_db_conn.rollback()
+            finally:
+                if health_db_conn: health_db_conn.close()
+
+        except sqlite3.Error as e: # For shodan_db connection
+            logging.error(f"SQLite error during shodan_scanner.db processing: {e}")
+            if shodan_db_conn: shodan_db_conn.rollback()
+        except Exception as e: # For shodan_db connection
+            logging.error(f"Unexpected error during shodan_scanner.db processing: {e}")
+            if shodan_db_conn: shodan_db_conn.rollback()
         finally:
-            if conn:
-                conn.close()
-    else:
+            if shodan_db_conn: shodan_db_conn.close()
+    else: # No shodan_results
         logging.info("No Shodan results to validate or process for DB in this cycle.")
-        # Still log a scan history entry to show the Shodan query part ran
-        scan_start_time = time.time() # Approximate timing
-        conn = None
+        scan_start_time_shodan_db = time.time() # Approximate timing for empty scan
+        shodan_db_conn = None
         try:
-            conn = sqlite3.connect(config['DATABASE_PATH'])
-            cursor = conn.cursor()
-            scan_duration_seconds = time.time() - scan_start_time
-            add_scan_history(cursor, 0, 0, 0, scan_duration_seconds)
-            conn.commit()
+            shodan_db_conn = sqlite3.connect(config['DATABASE_PATH'])
+            shodan_db_cursor = shodan_db_conn.cursor()
+            scan_duration_shodan_db_seconds = time.time() - scan_start_time_shodan_db
+            add_scan_history(shodan_db_cursor, 0, 0, 0, scan_duration_shodan_db_seconds)
+            shodan_db_conn.commit()
         except sqlite3.Error as e:
-            logging.error(f"SQLite error logging empty scan cycle: {e}")
+            logging.error(f"SQLite error logging empty scan cycle to shodan_scanner.db: {e}")
         finally:
-            if conn:
-                conn.close()
+            if shodan_db_conn: shodan_db_conn.close()
 
     logging.info("Scan cycle finished.")
 
